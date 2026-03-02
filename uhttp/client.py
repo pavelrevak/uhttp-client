@@ -639,6 +639,8 @@ class HttpClient:
     def _recv_to_buffer(self, max_size):
         try:
             data = self._socket.recv(max_size - len(self._buffer))
+        except (_ssl.SSLWantReadError, _ssl.SSLWantWriteError):
+            return False
         except OSError as err:
             if err.errno == errno.EAGAIN:
                 return False
@@ -681,6 +683,8 @@ class HttpClient:
                     break
                 if sent > 0:
                     self._send_buffer = self._send_buffer[sent:]
+            except (_ssl.SSLWantReadError, _ssl.SSLWantWriteError):
+                break
             except OSError as err:
                 if err.errno == errno.EAGAIN:
                     break

@@ -543,23 +543,74 @@ PYTHONPATH=./server:./client python examples/client_basic.py
 
 ## CLI Tool
 
-Simple curl-like CLI tool using uhttp.client:
+After installing the package, `uhttp` command is available:
 
 ```bash
-# GET request
-python -m tools.httpcl http://httpbin.org/get
-
-# POST with JSON
-python -m tools.httpcl http://httpbin.org/post -j '{"key": "value"}'
-
-# Verbose mode
-python -m tools.httpcl -v https://httpbin.org/get
-
-# Save to file
-python -m tools.httpcl https://httpbin.org/image/png -o image.png
+pip install uhttp-client
 ```
 
-See `python -m tools.httpcl --help` for all options.
+### Basic usage
+
+```bash
+# GET request (default)
+uhttp https://httpbin.org/get
+
+# POST with JSON data
+uhttp https://httpbin.org/post -j '{"key": "value"}'
+
+# POST with form data (method auto-detected from data)
+uhttp https://httpbin.org/post -d "name=john&age=30"
+
+# Explicit HTTP method
+uhttp PUT https://httpbin.org/put -j '{"update": true}'
+uhttp DELETE https://httpbin.org/delete
+uhttp PATCH https://httpbin.org/patch -d "field=value"
+```
+
+### Options
+
+```bash
+# Custom headers
+uhttp https://httpbin.org/get -H "Authorization: Bearer token"
+
+# Save response to file
+uhttp https://httpbin.org/image/png -o image.png
+
+# Send file content
+uhttp https://httpbin.org/post -f document.pdf
+
+# JSON from file
+uhttp https://httpbin.org/post -j @data.json
+
+# Verbose mode (show headers and timing)
+uhttp https://httpbin.org/get -v
+
+# Skip SSL verification
+uhttp https://self-signed.example.com -k
+
+# Custom timeout
+uhttp https://slow-api.example.com -t 60
+```
+
+### Method detection
+
+- No data → `GET`
+- With `-d`, `-j`, or `-f` → `POST`
+- Explicit method before URL → uses that method
+
+```bash
+uhttp example.com/api           # GET
+uhttp example.com/api -d "x=1"  # POST (auto)
+uhttp GET example.com/api -d "" # GET (explicit, ignores data rule)
+```
+
+### Run without installation
+
+```bash
+python -m uhttp.cli https://httpbin.org/get
+```
+
+See `uhttp --help` for all options.
 
 
 ## IPv6 Support

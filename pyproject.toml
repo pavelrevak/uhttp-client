@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "uhttp-client"
-version = "2.2.0"
+version = "2.2.1"
 description = "Micro HTTP client for Python and MicroPython"
 readme = "README.md"
 authors = [
@@ -20,8 +20,11 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/pavelrevak/uhttp"
-Repository = "https://github.com/pavelrevak/uhttp"
+Homepage = "https://github.com/pavelrevak/uhttp-client"
+Repository = "https://github.com/pavelrevak/uhttp-client"
+
+[project.scripts]
+uhttp = "uhttp.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["uhttp*"]
