@@ -644,6 +644,36 @@ client = uhttp.client.HttpClient('http://[::1]:8080')
 
 For running tests from meta-repo, see [uhttp README](https://github.com/pavelrevak/uhttp#testing).
 
+### MicroPython integration tests
+
+Tests run on real ESP32 hardware via [mpytool](https://github.com/pavelrevak/mpytool).
+
+**Configuration:**
+
+1. WiFi credentials in `~/.config/uhttp/wifi.json`:
+   ```json
+   {"ssid": "MyWiFi", "password": "secret"}
+   ```
+
+2. Serial port via environment variable or mpytool config:
+   ```bash
+   # Environment variable
+   export MPY_TEST_PORT=/dev/ttyUSB0
+
+   # Or mpytool config
+   echo "/dev/ttyUSB0" > ~/.config/mpytool/ESP32
+   ```
+
+**Run tests:**
+
+```bash
+MPY_TEST_PORT=/dev/ttyUSB0 ../.venv/bin/python -m unittest tests.test_mpy_integration -v
+```
+
+**Note:** MicroPython requires explicit `ssl_context` for HTTPS connections.
+
 ### CI
 
-Tests run automatically on push/PR via GitHub Actions (Ubuntu + Windows, Python 3.10 + 3.14).
+Tests run automatically on push/PR via GitHub Actions:
+- Unit tests: Ubuntu + Windows, Python 3.10 + 3.14
+- MicroPython tests: Self-hosted runner with ESP32
