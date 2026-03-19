@@ -688,6 +688,12 @@ class HttpClient:
         if len(self._buffer) >= MAX_RESPONSE_HEADERS_LENGTH:
             raise HttpResponseError("Response headers too large")
 
+    def _has_ssl_pending(self):
+        """Check if SSL socket has buffered data that select() can't see"""
+        return (self._socket is not None and
+                hasattr(self._socket, 'pending') and
+                self._socket.pending() > 0)
+
     def _recv_to_buffer(self, max_size):
         try:
             data = self._socket.recv(max_size - len(self._buffer))
@@ -788,7 +794,10 @@ class HttpClient:
             if self._socket in write_sockets and self._state == STATE_SENDING:
                 self._try_send()
 
-            if self._socket in read_sockets:
+            # SSL may buffer decrypted data internally that select() can't see
+            socket_readable = (self._socket in read_sockets or
+                               self._has_ssl_pending())
+            if socket_readable:
                 if self._state == STATE_WAITING_100_CONTINUE:
                     self._process_100_continue()
                 elif self._state == STATE_RECEIVING_HEADERS:
@@ -904,10 +913,12 @@ class HttpClient:
             else:
                 remaining = None
 
+            # SSL may have buffered data that select() can't see
+            select_timeout = 0 if self._has_ssl_pending() else remaining
             r, w, _ = _select.select(
                 self.read_sockets,
                 self.write_sockets,
-                [], remaining
+                [], select_timeout
             )
 
             # Always call process_events to check request timeout
