@@ -154,6 +154,19 @@ class TestHTTPSIntegration(unittest.TestCase):
         finally:
             client.close()
 
+    def test_https_expect_100_continue(self):
+        """Test Expect: 100-continue with real server"""
+        client = uhttp_client.HttpClient('https://httpbin.org')
+        try:
+            body = b'test data for 100 continue'
+            response = client.post(
+                '/post', data=body, expect_continue=True).wait()
+            self.assertEqual(response.status, 200)
+            # httpbin echoes back the data
+            self.assertEqual(response.json()['data'], body.decode())
+        finally:
+            client.close()
+
 
 @unittest.skipIf(not HTTPBIN_AVAILABLE, SKIP_REASON)
 class TestHTTPSAuthIntegration(unittest.TestCase):
