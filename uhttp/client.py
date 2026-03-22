@@ -586,8 +586,12 @@ class HttpClient:
 
     def _process_connecting(self):
         """Handle TCP connect completion (socket became writable)"""
-        err = self._socket.getsockopt(
-            _socket.SOL_SOCKET, _socket.SO_ERROR)
+        try:
+            err = self._socket.getsockopt(
+                _socket.SOL_SOCKET, _socket.SO_ERROR)
+        except (AttributeError, OSError):
+            # MicroPython socket may not have getsockopt
+            err = 0
         if err != 0:
             self._close()
             raise HttpConnectionError(f"Connect failed: error {err}")
