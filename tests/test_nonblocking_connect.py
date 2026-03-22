@@ -5,6 +5,7 @@ Tests for non-blocking connect (TCP and SSL handshake via select)
 import os
 import select
 import ssl
+import sys
 import threading
 import time
 import unittest
@@ -212,6 +213,9 @@ class TestNonBlockingConnectRefused(unittest.TestCase):
 
         client.close()
 
+    @unittest.skipIf(
+        sys.platform == 'win32',
+        'Windows signals connect errors via except fds in select()')
     def test_connection_refused_via_process_events(self):
         """Test connection refused detected via process_events"""
         client = uhttp_client.HttpClient('127.0.0.1', port=59998)
