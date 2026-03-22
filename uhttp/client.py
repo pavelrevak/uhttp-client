@@ -1025,11 +1025,14 @@ class HttpClient:
 
             # SSL may have buffered data that select() can't see
             select_timeout = 0 if self._has_ssl_pending() else remaining
-            r, w, _ = _select.select(
+            r, w, x = _select.select(
                 self.read_sockets,
                 self.write_sockets,
-                [], select_timeout
+                self.write_sockets, select_timeout
             )
+            # Windows signals connect errors via except set
+            if x:
+                w = list(set(w) | set(x))
 
             # Always call process_events to check request timeout
             response = self.process_events(r, w)
