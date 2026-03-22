@@ -4,7 +4,7 @@
 ## Features
 
 - MicroPython and CPython compatible
-- Select-based async (no async/await, no threading)
+- Fully non-blocking: TCP connect, SSL handshake, and HTTP I/O via select
 - Keep-alive connections with automatic reuse
 - Fluent API: `response = client.get('/path').wait()`
 - URL parsing with automatic SSL detection
@@ -143,7 +143,7 @@ client.close()
 
 ## Async (non-blocking) mode
 
-Default mode is async. Use with external select loop:
+Everything is non-blocking by default — TCP connect, SSL handshake, and HTTP I/O all happen through `select()`. This is critical for embedded devices on slow networks (4G modems, ESP32 PPP) where each phase can take seconds.
 
 ```python
 import select
@@ -151,10 +151,10 @@ import uhttp.client
 
 client = uhttp.client.HttpClient('http://httpbin.org')
 
-# Start request (non-blocking)
+# Start request (non-blocking, including connect)
 client.get('/delay/2')
 
-# Manual select loop
+# Manual select loop - handles connect, send, and receive
 while True:
     r, w, _ = select.select(
         client.read_sockets,
@@ -170,7 +170,24 @@ while True:
 client.close()
 ```
 
+### State machine
+
+After `client.get('/path')`, the client progresses through states automatically via `process_events()`:
+
+| State | Description | select watches |
+|---|---|---|
+| `STATE_CONNECTING` | TCP connect in progress | write |
+| `STATE_SSL_HANDSHAKE` | SSL handshake in progress | read or write |
+| `STATE_SENDING` | Sending request data | write |
+| `STATE_RECEIVING_HEADERS` | Waiting for response headers | read |
+| `STATE_RECEIVING_BODY` | Receiving response body | read |
+| `STATE_COMPLETE` | Response ready | — |
+
+The `state` property exposes the current state. The `is_connected` property returns `True` only after connect and handshake are complete.
+
 ### Parallel requests
+
+All clients share one select loop. Connect, handshake, and data transfer happen concurrently:
 
 ```python
 import select
@@ -182,11 +199,11 @@ clients = [
     uhttp.client.HttpClient('http://httpbin.org'),
 ]
 
-# Start all requests
+# Start all requests (non-blocking connects begin immediately)
 for i, client in enumerate(clients):
     client.get('/delay/1', query={'n': i})
 
-# Wait for all
+# Single select loop handles all clients
 results = {}
 while len(results) < len(clients):
     read_socks = []
@@ -208,6 +225,8 @@ for client in clients:
 ```
 
 ### Combined with HttpServer
+
+Server and client in the same select loop — true single-threaded concurrency:
 
 ```python
 import select
@@ -233,6 +252,72 @@ while True:
     response = backend.process_events(r, w)
     if response:
         incoming.respond(data=response.data)
+```
+
+### HTTPS with non-blocking handshake
+
+SSL handshake is also non-blocking. The client tracks whether `do_handshake()` needs to read or write, and exposes the socket only in the correct direction to prevent `select()` from spinning:
+
+```python
+import select
+import ssl
+import uhttp.client
+
+ctx = ssl.create_default_context()
+client = uhttp.client.HttpClient(
+    'api.example.com', port=443, ssl_context=ctx)
+
+# Connect + SSL handshake + request all happen via select
+client.get('/data')
+
+while True:
+    r, w, _ = select.select(
+        client.read_sockets,
+        client.write_sockets,
+        [], 10.0
+    )
+    response = client.process_events(r, w)
+    if response:
+        print(response.json())
+        break
+
+client.close()
+```
+
+### Multiple HTTPS clients in parallel
+
+```python
+import select
+import uhttp.client
+
+urls = [
+    'https://api1.example.com/data',
+    'https://api2.example.com/data',
+    'https://api3.example.com/data',
+]
+
+clients = [uhttp.client.HttpClient(url) for url in urls]
+for c in clients:
+    c.get('/')  # All start non-blocking connects + SSL handshakes
+
+responses = [None] * len(clients)
+while not all(responses):
+    read_socks = []
+    write_socks = []
+    for c in clients:
+        read_socks.extend(c.read_sockets)
+        write_socks.extend(c.write_sockets)
+
+    r, w, _ = select.select(read_socks, write_socks, [], 10.0)
+
+    for i, c in enumerate(clients):
+        if responses[i] is None:
+            resp = c.process_events(r, w)
+            if resp:
+                responses[i] = resp
+
+for c in clients:
+    c.close()
 ```
 
 
@@ -294,8 +379,8 @@ Parameters:
 - `host` - Server hostname
 - `port` - Server port
 - `base_path` - Base path from URL (prepended to all request paths)
-- `is_connected` - True if socket is connected
-- `state` - Current state (STATE_IDLE, STATE_SENDING, etc.)
+- `is_connected` - True if TCP (and SSL) connection is fully established
+- `state` - Current state (STATE_IDLE, STATE_CONNECTING, STATE_SSL_HANDSHAKE, STATE_SENDING, etc.)
 - `auth` - Authentication credentials tuple (username, password) or None
 - `cookies` - Cookies dict (persistent across requests)
 - `read_sockets` - Sockets to monitor for reading (for select)
@@ -487,11 +572,26 @@ client.close()
 
 ## Timeouts
 
-Two types of timeouts:
+Three types of timeouts:
+
+### Connect timeout
+
+Time allowed for TCP connect + SSL handshake. Set via `connect_timeout` parameter (default: 10s).
+When expired during connect/handshake phase, raises `HttpTimeoutError`.
+
+```python
+import uhttp.client
+
+# Short connect timeout for fast-fail on unreachable hosts
+client = uhttp.client.HttpClient('https://example.com', connect_timeout=3)
+
+# Long connect timeout for slow 4G/satellite links
+client = uhttp.client.HttpClient('https://example.com', connect_timeout=30)
+```
 
 ### Request timeout
 
-Total time allowed for the request. Set via `timeout` parameter on client or per-request.
+Total time allowed for the entire request (including connect). Set via `timeout` parameter on client or per-request.
 When expired, raises `HttpTimeoutError` and closes connection.
 
 ```python
@@ -503,6 +603,8 @@ client = uhttp.client.HttpClient('https://example.com', timeout=30)
 # Per-request timeout (overrides client default)
 response = client.get('/slow', timeout=60).wait()
 ```
+
+Both `connect_timeout` and `timeout` are checked during connect/handshake phases — whichever expires first triggers `HttpTimeoutError`.
 
 ### Wait timeout
 

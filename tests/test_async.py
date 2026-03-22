@@ -84,8 +84,10 @@ class TestClientAsync(unittest.TestCase):
         # Start request
         client.get('/test')
 
-        # Should be sending or receiving (depending on how fast)
+        # Should be connecting, sending or receiving (depending on how fast)
         self.assertIn(client.state, [
+            uhttp_client.STATE_CONNECTING,
+            uhttp_client.STATE_SSL_HANDSHAKE,
             uhttp_client.STATE_SENDING,
             uhttp_client.STATE_RECEIVING_HEADERS,
             uhttp_client.STATE_RECEIVING_BODY,

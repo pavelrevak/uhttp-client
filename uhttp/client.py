@@ -42,11 +42,12 @@ EXPECT_100_CONTINUE = '100-continue'
 
 STATE_IDLE = 0
 STATE_CONNECTING = 1
-STATE_SENDING = 2
-STATE_RECEIVING_HEADERS = 3
-STATE_RECEIVING_BODY = 4
-STATE_COMPLETE = 5
-STATE_WAITING_100_CONTINUE = 6
+STATE_SSL_HANDSHAKE = 2
+STATE_SENDING = 3
+STATE_RECEIVING_HEADERS = 4
+STATE_RECEIVING_BODY = 5
+STATE_COMPLETE = 6
+STATE_WAITING_100_CONTINUE = 7
 
 
 class HttpClientError(Exception):
@@ -352,6 +353,7 @@ class HttpClient:
 
         self._socket = None
         self._state = STATE_IDLE
+        self._ssl_want_read = True
         self._buffer = bytearray()
         self._send_buffer = bytearray()
 
@@ -396,7 +398,8 @@ class HttpClient:
 
     @property
     def is_connected(self):
-        return self._socket is not None
+        return (self._socket is not None
+                and self._state not in (STATE_CONNECTING, STATE_SSL_HANDSHAKE))
 
     @property
     def port(self):
@@ -408,6 +411,8 @@ class HttpClient:
 
     @property
     def read_sockets(self):
+        if self._socket and self._state == STATE_SSL_HANDSHAKE:
+            return [self._socket] if self._ssl_want_read else []
         if self._socket and self._state in (
                 STATE_WAITING_100_CONTINUE,
                 STATE_RECEIVING_HEADERS, STATE_RECEIVING_BODY):
@@ -420,6 +425,10 @@ class HttpClient:
 
     @property
     def write_sockets(self):
+        if self._socket and self._state == STATE_CONNECTING:
+            return [self._socket]
+        if self._socket and self._state == STATE_SSL_HANDSHAKE:
+            return [self._socket] if not self._ssl_want_read else []
         if self._socket and self._state == STATE_SENDING and self._send_buffer:
             return [self._socket]
         return []
@@ -510,7 +519,6 @@ class HttpClient:
         if self._socket is not None:
             return
 
-        sock = None
         try:
             addr_info = _socket.getaddrinfo(
                 self._host, self._port, 0, _socket.SOCK_STREAM)
@@ -519,23 +527,111 @@ class HttpClient:
                     f"Cannot resolve host: {self._host}")
             family, socktype, proto, _, addr = addr_info[0]
             sock = _socket.socket(family, socktype, proto)
-            sock.settimeout(self._connect_timeout)
-            sock.connect(addr)
-
-            if self._ssl_context:
-                # SSL handshake must be done in blocking mode
-                sock = self._ssl_context.wrap_socket(
-                    sock, server_hostname=self._host)
-
             sock.setblocking(False)
-            self._socket = sock
-        except OSError as err:
-            if sock:
-                try:
+            try:
+                sock.connect(addr)
+                # Connect completed immediately (e.g. loopback)
+                self._socket = sock
+                self._connect_complete()
+            except OSError as err:
+                if err.errno == errno.EINPROGRESS:
+                    self._socket = sock
+                    self._state = STATE_CONNECTING
+                else:
                     sock.close()
-                except OSError:
-                    pass
+                    raise HttpConnectionError(
+                        f"Connect failed: {err}") from err
+        except HttpConnectionError:
+            raise
+        except OSError as err:
             raise HttpConnectionError(f"Connect failed: {err}") from err
+
+    def _connect_complete(self):
+        """TCP connection established, start SSL or proceed to sending"""
+        if self._ssl_context:
+            self._wrap_ssl()
+        else:
+            self._build_and_start_sending()
+
+    def _wrap_ssl(self):
+        """Wrap socket with SSL and start non-blocking handshake"""
+        try:
+            self._socket = self._ssl_context.wrap_socket(
+                self._socket, server_hostname=self._host,
+                do_handshake_on_connect=False)
+        except OSError as err:
+            self._close()
+            raise HttpConnectionError(
+                f"SSL wrap failed: {err}") from err
+        self._state = STATE_SSL_HANDSHAKE
+        self._process_ssl_handshake()
+
+    def _check_connect_timeout(self):
+        """Check if connect/handshake phase has timed out"""
+        if self._request_start_time is not None:
+            elapsed = _time.time() - self._request_start_time
+            if self._connect_timeout and elapsed > self._connect_timeout:
+                self._close()
+                raise HttpTimeoutError("Connect timed out")
+            timeout = (self._request_timeout
+                       if self._request_timeout is not None
+                       else self._timeout)
+            if timeout and elapsed > timeout:
+                self._close()
+                raise HttpTimeoutError("Request timed out")
+
+    def _process_connecting(self):
+        """Handle TCP connect completion (socket became writable)"""
+        err = self._socket.getsockopt(
+            _socket.SOL_SOCKET, _socket.SO_ERROR)
+        if err != 0:
+            self._close()
+            raise HttpConnectionError(f"Connect failed: error {err}")
+        self._connect_complete()
+
+    def _process_ssl_handshake(self):
+        """Continue non-blocking SSL handshake"""
+        try:
+            self._socket.do_handshake()
+        except _ssl.SSLWantReadError:
+            self._ssl_want_read = True
+            return
+        except _ssl.SSLWantWriteError:
+            self._ssl_want_read = False
+            return
+        except AttributeError:
+            # MicroPython: no do_handshake(), handshake happens
+            # implicitly during first send/recv
+            pass
+        except OSError as err:
+            if err.errno in (errno.EAGAIN, errno.ENOENT):
+                self._ssl_want_read = True  # MicroPython
+                return
+            self._close()
+            raise HttpConnectionError(
+                f"SSL handshake failed: {err}") from err
+        # Handshake complete
+        self._build_and_start_sending()
+
+    def _build_and_start_sending(self):
+        """Build HTTP request and start sending"""
+        headers_copy = dict(
+            self._request_headers) if self._request_headers else {}
+        request_data = self._build_request(
+            self._request_method, self._request_path,
+            headers_copy, self._request_data, self._request_query,
+            expect_continue=self._request_expect_continue)
+
+        if isinstance(request_data, tuple):
+            headers, body = request_data
+            self._send_buffer.extend(headers)
+            self._pending_body = body
+        else:
+            self._send_buffer.extend(request_data)
+            self._pending_body = None
+
+        self._state = STATE_SENDING
+        self._try_send()
 
     def _finalize_response(self):
         # Handle 401 Digest challenge
@@ -790,7 +886,24 @@ class HttpClient:
             return None
 
         try:
-            # First process any ready sockets - response may have arrived
+            # Handle non-blocking connect completion
+            if self._state == STATE_CONNECTING:
+                if self._socket in write_sockets:
+                    self._process_connecting()
+                if self._state == STATE_CONNECTING:
+                    self._check_connect_timeout()
+                    return None
+
+            # Handle non-blocking SSL handshake
+            if self._state == STATE_SSL_HANDSHAKE:
+                if (self._socket in read_sockets
+                        or self._socket in write_sockets):
+                    self._process_ssl_handshake()
+                if self._state == STATE_SSL_HANDSHAKE:
+                    self._check_connect_timeout()
+                    return None
+
+            # Send request data
             if self._socket in write_sockets and self._state == STATE_SENDING:
                 self._try_send()
 
@@ -815,7 +928,7 @@ class HttpClient:
             self._close()
             raise
 
-        # Check timeout only if no complete response yet
+        # Check request timeout for sending/receiving phases
         if self._request_start_time is not None:
             timeout = self._request_timeout if self._request_timeout is not None else self._timeout
             if timeout and _time.time() - self._request_start_time > timeout:
@@ -845,6 +958,14 @@ class HttpClient:
         if self._state != STATE_IDLE:
             raise HttpClientError("Request already in progress")
 
+        # Validate data type early (before non-blocking connect)
+        if (data is not None
+                and not isinstance(
+                    data, (dict, list, tuple, str, bytes,
+                           bytearray, memoryview))):
+            raise HttpClientError(
+                f"Unsupported data type: {type(data).__name__}")
+
         self._reset_request()
         self._request_method = method
         self._request_path = path
@@ -862,27 +983,13 @@ class HttpClient:
 
     def _start_request(self):
         """Internal: start sending current request"""
-        if not self.is_connected:
+        if self._socket is None:
             self._connect()
-
-        # Make copy to avoid modifying stored headers
-        headers_copy = dict(self._request_headers) if self._request_headers else {}
-        request_data = self._build_request(
-            self._request_method, self._request_path,
-            headers_copy, self._request_data, self._request_query,
-            expect_continue=self._request_expect_continue)
-
-        # If expect_continue, request_data is (headers, body) tuple
-        if isinstance(request_data, tuple):
-            headers, body = request_data
-            self._send_buffer.extend(headers)
-            self._pending_body = body
-        else:
-            self._send_buffer.extend(request_data)
-            self._pending_body = None
-
-        self._state = STATE_SENDING
-        self._try_send()
+            # If non-blocking connect in progress, request will be
+            # built when connection completes
+            if self._state in (STATE_CONNECTING, STATE_SSL_HANDSHAKE):
+                return
+        self._build_and_start_sending()
 
     def wait(self, timeout=None):
         """Wait for response (blocking).
