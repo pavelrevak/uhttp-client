@@ -120,6 +120,11 @@ class MpyTestCase(unittest.TestCase):
 
         # Mount uhttp client module with mpy-cross compilation
         client_dir = Path(__file__).parent.parent / 'uhttp'
+        # Clear mpy-cross cache to ensure fresh compilation
+        pycache = client_dir / '__pycache__'
+        if pycache.exists():
+            import shutil
+            shutil.rmtree(pycache)
         mpy_cross = MpyCross()
         mpy_cross.init(cls.mpy.platform())
         cls.mount_handler = cls.mpy.mount(
